@@ -19,6 +19,10 @@ import subprocess
 import sys
 from dotenv import load_dotenv
 
+
+class BoundarySessionCancelledError(RuntimeError):
+    """Raised when the Boundary session is cancelled externally (e.g. by an admin)."""
+
 load_dotenv()
 
 # Module-level session state
@@ -96,38 +100,38 @@ def authenticate_password() -> None:
 def authenticate_oidc() -> None:
     """
     Authenticate to HCP Boundary using OIDC (browser-based SSO).
-    Blocks until the browser flow completes.
+    Blocks until the human completes the browser flow (IBM Verify + MFA).
     Sets the BOUNDARY_TOKEN environment variable.
 
-    NOTE: stdout must NOT be captured so the boundary CLI can open the
-    browser and print the callback URL to the terminal. We redirect only
-    stderr to PIPE so we can surface errors without interfering with the
-    browser flow. The token JSON is written to a temp file via -output-file.
+    Boundary CLI v0.19–0.20: token written to -output-file (temp file).
+    Boundary CLI v0.21+:     -output-file removed; token JSON is written to
+                             stdout with -format=json; the browser callback
+                             URL and progress messages go to stderr so the
+                             human sees them in the terminal.
+
+    We capture stdout to extract the token. stderr is left as-is (inherited)
+    so the browser URL and login progress remain visible to the operator.
+
+    -keyring-type=none   — skip OS keychain; we own the token lifetime
+    -token-name=none     — don't persist a named token entry in the keyring
     """
-    import tempfile, pathlib
-
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    try:
-        subprocess.run(
-            [
-                "boundary", "authenticate", "oidc",
-                f"-addr={os.environ['BOUNDARY_ADDR']}",
-                f"-auth-method-id={os.environ['BOUNDARY_OIDC_AUTH_METHOD_ID']}",
-                f"-token-name=none",
-                f"-format=json",
-                f"-keyring-type=none",
-            ],
-            stdout=open(tmp_path, "w"),
-            text=True,
-            check=True,
-        )
-        data = json.loads(pathlib.Path(tmp_path).read_text())
-        token = data["item"]["attributes"]["token"]
-        os.environ["BOUNDARY_TOKEN"] = token
-    finally:
-        pathlib.Path(tmp_path).unlink(missing_ok=True)
+    result = subprocess.run(
+        [
+            "boundary", "authenticate", "oidc",
+            f"-addr={os.environ['BOUNDARY_ADDR']}",
+            f"-auth-method-id={os.environ['BOUNDARY_OIDC_AUTH_METHOD_ID']}",
+            "-keyring-type=none",
+            "-token-name=none",
+            "-format=json",
+        ],
+        stdout=subprocess.PIPE,
+        # stderr intentionally not captured — browser URL must stay visible
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    token = data["item"]["attributes"]["token"]
+    os.environ["BOUNDARY_TOKEN"] = token
 
 
 def authenticate() -> None:
@@ -135,7 +139,14 @@ def authenticate() -> None:
     Authenticate to HCP Boundary using the method configured by BOUNDARY_AUTH_METHOD
     env var (defaults to 'password'). Dispatches to authenticate_password() or
     authenticate_oidc().
+
+    Skipped entirely if BOUNDARY_TOKEN is already set in the environment — this
+    allows a human to pre-authenticate via OIDC (browser + MFA) once and then
+    hand off to the agent without triggering a second browser flow.
     """
+    if os.environ.get("BOUNDARY_TOKEN"):
+        return
+
     method = os.environ.get("BOUNDARY_AUTH_METHOD", "password").lower()
     if method == "oidc":
         authenticate_oidc()
@@ -150,6 +161,21 @@ def authenticate() -> None:
 def is_connected() -> bool:
     """Return True if the Boundary proxy process is currently running."""
     return _session_proc is not None and _session_proc.poll() is None
+
+
+def check_cancelled() -> None:
+    """
+    Raise BoundarySessionCancelledError if the Boundary proxy process has exited
+    unexpectedly — i.e. the session was cancelled from outside (e.g. by an admin
+    terminating the session in the Boundary control plane).
+
+    A non-zero return code indicates an external cancellation rather than a clean
+    disconnect initiated by this process (which sets _session_proc to None first).
+    """
+    if _session_proc is not None and _session_proc.poll() is not None:
+        raise BoundarySessionCancelledError(
+            "Boundary session has been cancelled externally by the admin."
+        )
 
 
 def connect(target_id: str) -> dict:

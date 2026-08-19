@@ -142,7 +142,14 @@ or
 # ---------------------------------------------------------------------------
 
 def execute_tool(tool_name: str, args: dict) -> str:
-    """Execute a named tool and return an observation string."""
+    """Execute a named tool and return an observation string.
+
+    Raises boundary_session.BoundarySessionCancelledError if the Boundary
+    session has been cancelled externally before the tool runs.
+    """
+    # Check whether the Boundary process was killed externally before each tool call.
+    # This raises BoundarySessionCancelledError if the session is gone.
+    boundary_session.check_cancelled()
 
     if tool_name == "connect_to_host":
         target_id = os.environ["BOUNDARY_TARGET_ID"]

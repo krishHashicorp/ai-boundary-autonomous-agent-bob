@@ -99,48 +99,124 @@ Agent: Disconnected.
 
 ---
 
+## EC2 Demo Setup
+
+Before running the SRE scenarios, prepare your Ubuntu 22.04 EC2 instance with the included setup script. It installs all required packages, seeds demo data, and creates background services that make the scenarios realistic.
+
+```bash
+# Copy to your EC2 instance and run once
+scp ec2-demo-setup.sh ubuntu@<your-ec2-ip>:~
+ssh ubuntu@<your-ec2-ip> "bash ec2-demo-setup.sh"
+```
+
+**What the script installs and configures:**
+
+| Package / Resource | Purpose |
+|---|---|
+| `nginx` | Web server — required for `service-triage` and `log-rotation-audit` |
+| `sysstat` | Provides `iostat` / `sar` — required for `io-performance` |
+| `stress-ng` | CPU/memory load generator — used in `high-load-triage` |
+| `fail2ban` | Seeds auth failure log entries — used in `auth-audit` |
+| Demo cron jobs | User crontab + `/etc/cron.d/demo-cleanup` — used in `cron-audit` |
+| 512 MB dummy file | `/var/lib/demo-large-file.bin` — used in `disk-triage` |
+| `demo-zombie.service` | Persistent zombie process — used in `zombie-processes` |
+
+**Minimum instance:** `t3.small` (2 vCPU, 2 GB RAM). Re-running the script is safe — all steps are idempotent.
+
+---
+
 ## Running the Autonomous Agent
 
 Open `ai-boundary-agent-autonomous.code-workspace` in VS Code, or run directly:
 
 ```bash
+# Free-form goal
 python main_autonomous.py "Audit disk usage, memory, and top CPU processes, then report"
-python main_autonomous.py --auth oidc "Check if nginx is running and report its status"
+
+# Named SRE scenario
+python main_autonomous.py --scenario health-check
+python main_autonomous.py --scenario service-triage --auth oidc
+
+# List all available scenarios
+python main_autonomous.py --list-scenarios
 ```
 
 The agent prints its plan before executing, then shows each sub-task result as it completes:
 
 ```
 ──────────── WatsonX + HCP Boundary Autonomous Agent ────────────
-Auth: password · Mode: autonomous
+Auth: password · Mode: autonomous · Scenario: Full System Health Check
 
-Goal: Audit disk usage, memory, and top CPU processes, then report
+Goal: Run a full system health check: report CPU load average, memory pressure,
+disk usage across all mount points, and the top 5 resource-consuming processes
 
 ──────────────────────────── Plan ───────────────────────────────
   1. Connect to the host
-  2. Check disk usage on all mount points
-  3. Check available memory
-  4. List top 5 CPU-consuming processes
+  2. Check CPU load average and memory pressure
+  3. Check disk usage across all mount points
+  4. List the top 5 resource-consuming processes
   5. Disconnect from the host
 
 ──────────── Step 1 — Connect to the host ───────────────────────
 Connected. Boundary session active. SSH connected as mock-ai-agent-linux.
 
-──────────── Step 2 — Check disk usage on all mount points ──────
-/dev/sda1: 50G total, 12G used (25%), 36G free.
+──────────── Step 2 — Check CPU load average and memory pressure ─
+Load average: 0.12 (1 min). Memory: 3.5 GB used of 8 GB total, 4.5 GB free.
 
 ... (steps 3–5) ...
 
 ──────────────────────────── Summary ────────────────────────────
  Sub-task                              Result
  Connect to the host                   Connected successfully.
- Check disk usage on all mount points  /dev/sda1: 25% used, 36G free.
- Check available memory                3.2 GB free of 8 GB total.
- List top 5 CPU-consuming processes    python3 12.4%, nginx 3.1%, ...
+ Check CPU load and memory pressure    Load: 0.12. Memory: 4.5 GB free.
+ Check disk usage                      /dev/sda1: 25% used, 36G free.
+ Top 5 resource-consuming processes    python3 12.4%, nginx 3.1%, ...
  Disconnect from the host              Disconnected.
 
-✓ Goal achieved: All audit tasks completed successfully.
+✓ Goal achieved: All health check tasks completed successfully.
 ```
+
+---
+
+## SRE Scenario Reference
+
+Run `python main_autonomous.py --list-scenarios` for the full interactive list. All 13 named scenarios:
+
+### Observability & Health Checks
+
+| Key | Name | Prerequisites |
+|---|---|---|
+| `health-check` | Full System Health Check | None |
+| `zombie-processes` | Zombie & D-State Process Hunt | `ec2-demo-setup.sh` (demo-zombie service) |
+| `io-performance` | Disk I/O Performance Analysis | `ec2-demo-setup.sh` (sysstat) |
+
+### Incident Triage
+
+| Key | Name | Prerequisites |
+|---|---|---|
+| `disk-triage` | Disk Usage Triage | `ec2-demo-setup.sh` (512 MB dummy file) |
+| `memory-leak-triage` | Memory Leak Triage | None |
+| `auth-audit` | Authentication Security Audit | `ec2-demo-setup.sh` (fail2ban) |
+| `service-triage` | Nginx Service Triage | `ec2-demo-setup.sh` (nginx) |
+| `high-load-triage` | High CPU Load Triage | `ec2-demo-setup.sh` (stress-ng, optional) |
+
+### Platform / Infrastructure Ops
+
+| Key | Name | Prerequisites |
+|---|---|---|
+| `failed-services` | Failed & Degraded Services Audit | None |
+| `system-inventory` | System Inventory Report | None |
+| `cron-audit` | Scheduled Jobs Audit | `ec2-demo-setup.sh` (demo cron entries) |
+| `log-rotation-audit` | Log Rotation Audit | `ec2-demo-setup.sh` (nginx + log entries) |
+| `onboarding-audit` | SRE Onboarding Audit | None |
+
+### Nginx Operations
+
+| Key | Name | Prerequisites |
+|---|---|---|
+| `nginx-access-analysis` | Nginx Traffic Pattern Analysis | `ec2-demo-setup.sh` (nginx + seeded logs) |
+| `nginx-config-audit` | Nginx Configuration Audit | nginx installed and running |
+| `nginx-incident-response` | Nginx Incident Response | nginx installed; optionally stop nginx first for a fault demo |
 
 ---
 
